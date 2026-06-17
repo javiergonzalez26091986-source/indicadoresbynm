@@ -3,227 +3,191 @@ import pandas as pd
 import io
 
 # --- Configuración Inicial ---
-st.set_page_config(page_title="Consolidador de Kilómetros", layout="wide")
-
-NOMBRE_PESTAÑA = "Programacion"
-FILTRO_CONCESIONARIO = ['Blanco y Negro Masivo', 'BYNCPC']
+st.set_page_config(page_title="Consolidador Total de Kilómetros", layout="wide")
 TABLA_ESTILO = 'Table Style Light 9'
 
-COLUMNAS_CRUDAS = [
-    'Fecha', 'Día tipo', 'Designación de tarea vehículo', 'Línea', 'Tipo de viaje corto', 
-    'Sentido', 'Tipo Kilómetros', 'Número de Vehículo', 'Concesionario de Transporte', 
-    'Número de tarea vehículo', 'Desde', 'hasta', 'Duración', 'Punto de inicio', 
-    'Punto de término', 'Largo', 'Número de viaje', 'Tipo de vehículo del viaje', 
-    'Secuencia de arcos', 'Descripción Novedad', 'Concesionario Programado', 
-    'Tipo de vehículo Programado', 'Incumplidos', 'Kilometros Programados-Desvios', 
-    'Kilometros Programados Plan', 'Observacion Analista Kilometros'
-]
+st.title("🚌 Consolidador Total de Kilómetros")
+st.markdown("Sube todos los insumos. El sistema unificará Arreglados, Conciliados, Programación, Novedades (Reporte de Operación), Observaciones y Actas en un solo **Consolidado Maestro**.")
 
-COLUMNAS_SALIDA_RESUMEN = [
-    'Origen', 'Fecha', 'Día tipo', 'Concesionario Programado', 
-    'Concesionario de Transporte', 'Tipo de vehículo del viaje', 
-    'Kilometros Programados Plan', 'Largo Total', 'Largo Observado' 
-]
-
-# --- Funciones de Procesamiento ---
-
-@st.cache_data
-def procesar_archivos(lista_archivos, tipo_origen):
-    """Procesa los archivos cargados en Streamlit."""
-    datos_carpeta = []
-    datos_observados = [] # Para guardar el detalle extra de Arreglados
-    
-    if not lista_archivos:
-        return datos_carpeta, datos_observados
-        
-    for archivo in lista_archivos:
-        try:
-            # Leer excel desde el buffer de memoria subido
-            df = pd.read_excel(archivo, sheet_name=NOMBRE_PESTAÑA)
-            
-            # --- 1. Filtrar Concesionario ---
-            df_filtrado = df[df['Concesionario Programado'].isin(FILTRO_CONCESIONARIO)].copy()
-            
-            if df_filtrado.empty:
-                continue
-
-            # --- Extraer detalles de Observados (Solo para Arreglados) ---
-            if tipo_origen == "Arreglados":
-                try:
-                    nombre_col_ah = df.columns[33]
-                    # Renombrar temporalmente
-                    df_filtrado.rename(columns={nombre_col_ah: 'Observacion Analista Kilometros'}, inplace=True)
-                    # Filtrar 'Observado'
-                    is_observado = df_filtrado['Observacion Analista Kilometros'].astype(str).str.contains('Observado', case=False, na=False)
-                    df_observados_solo = df_filtrado[is_observado].copy()
-                    
-                    if not df_observados_solo.empty:
-                        # Mantener hasta la columna AH (índice 33)
-                        cols_mantener = df_observados_solo.columns[:34].tolist()
-                        df_det = df_observados_solo[cols_mantener].copy()
-                        df_det['Archivo Origen'] = archivo.name
-                        datos_observados.append(df_det)
-                except IndexError:
-                    pass # El archivo no tiene tantas columnas
-            
-            # --- Preparar para la Consolidación ---
-            columnas_base = [col for col in COLUMNAS_CRUDAS if col != 'Observacion Analista Kilometros']
-            columnas_a_seleccionar = [col for col in columnas_base if col in df_filtrado.columns]
-            
-            if 'Observacion Analista Kilometros' not in df_filtrado.columns:
-                df_filtrado['Observacion Analista Kilometros'] = ''
-            columnas_a_seleccionar.append('Observacion Analista Kilometros')
-                
-            df_final = df_filtrado[columnas_a_seleccionar].copy()
-            df_final['Origen'] = tipo_origen
-            
-            cols_consolidacion = [
-                'Fecha', 'Día tipo', 'Concesionario de Transporte', 'Largo', 
-                'Tipo de vehículo del viaje', 'Concesionario Programado', 
-                'Observacion Analista Kilometros', 'Origen', 'Kilometros Programados Plan'
-            ]
-            
-            df_consolidacion = df_final[[col for col in cols_consolidacion if col in df_final.columns]].copy()
-            datos_carpeta.append(df_consolidacion)
-            
-        except Exception as e:
-            st.error(f"Error procesando el archivo {archivo.name}: {e}")
-            
-    return datos_carpeta, datos_observados
-
-
-def consolidar_df(df):
-    """Aplica la lógica de agrupación y resumen DIARIO."""
-    df['Largo'] = pd.to_numeric(df['Largo'], errors='coerce').fillna(0)
-    df['Kilometros Programados Plan'] = pd.to_numeric(df['Kilometros Programados Plan'], errors='coerce').fillna(0)
-    df['Fecha'] = pd.to_datetime(df['Fecha'], errors='coerce').dt.normalize()
-    df.dropna(subset=['Fecha'], inplace=True)
-    
-    group_cols = ['Fecha', 'Día tipo', 'Concesionario Programado', 'Concesionario de Transporte', 'Tipo de vehículo del viaje', 'Origen']
-    
-    def calculate_observado_largo(group):
-        is_observado = group['Observacion Analista Kilometros'].astype(str).str.contains('Observado', case=False, na=False)
-        return group.loc[is_observado, 'Largo'].sum()
-
-    df_totales = df.groupby(group_cols).agg(
-        Largo_Total=('Largo', 'sum'),
-        Kilometros_Plan=('Kilometros Programados Plan', 'sum')
-    ).reset_index()
-
-    df_observados = df.groupby(group_cols).apply(calculate_observado_largo).rename('Largo_Observado').reset_index()
-    df_consolidado = pd.merge(df_totales, df_observados, on=group_cols, how='left')
-    df_consolidado['Largo_Observado'] = df_consolidado['Largo_Observado'].fillna(0)
-    
-    df_consolidado.rename(columns={
-        'Largo_Total': 'Largo Total', 
-        'Largo_Observado': 'Largo Observado',
-        'Kilometros_Plan': 'Kilometros Programados Plan'
-    }, inplace=True)
-    
-    return df_consolidado[[col for col in COLUMNAS_SALIDA_RESUMEN if col in df_consolidado.columns]].copy()
-
-
-# --- Interfaz de Streamlit ---
-st.title("🚌 Consolidador de Kilómetros en Servicio")
-st.markdown("Sube los archivos de **Arreglados** y **Conciliados**. El sistema unificará el resumen, extraerá los detalles y aplicará la lógica que usabas en *Power Query* automáticamente.")
-
-col1, col2 = st.columns(2)
+# --- Interfaz de Carga de Archivos ---
+col1, col2, col3 = st.columns(3)
 
 with col1:
-    st.subheader("Archivos Arreglados")
-    archivos_arreglados = st.file_uploader("Selecciona los archivos Excel de Arreglados", accept_multiple_files=True, type=['xlsx', 'xls'], key="arr")
+    st.subheader("1. Kms en Servicio")
+    archivos_arreglados = st.file_uploader("📁 Arreglados (Crudos o Resumen)", accept_multiple_files=True, type=['xlsx', 'xls', 'csv'])
+    archivos_conciliados = st.file_uploader("📁 Conciliados (Crudos o Resumen)", accept_multiple_files=True, type=['xlsx', 'xls', 'csv'])
 
 with col2:
-    st.subheader("Archivos Conciliados")
-    archivos_conciliados = st.file_uploader("Selecciona los archivos Excel de Conciliados", accept_multiple_files=True, type=['xlsx', 'xls'], key="conc")
+    st.subheader("2. Operación y Novedades")
+    archivos_reporte = st.file_uploader("📄 Reporte de Operación", accept_multiple_files=True, type=['xlsx', 'xls', 'csv'])
+    archivo_bd = st.file_uploader("🗄️ Archivo BD (Jerarquías)", accept_multiple_files=False, type=['xlsx', 'xls', 'csv'])
+    archivos_observaciones = st.file_uploader("👀 Observaciones", accept_multiple_files=True, type=['xlsx', 'xls', 'csv'])
 
-if st.button("🚀 Procesar Datos", use_container_width=True, type="primary"):
-    if not archivos_arreglados and not archivos_conciliados:
-        st.warning("Por favor, sube al menos un archivo para comenzar.")
+with col3:
+    st.subheader("3. Planeación y Actas")
+    archivos_programacion = st.file_uploader("📅 Consolidado Programación", accept_multiple_files=True, type=['xlsx', 'xls', 'csv'])
+    archivos_actas = st.file_uploader("📑 Actas", accept_multiple_files=True, type=['xlsx', 'xls', 'csv'])
+
+# Función para leer múltiples archivos
+def cargar_multiples_archivos(lista_archivos):
+    if not lista_archivos:
+        return pd.DataFrame()
+    dfs = []
+    for archivo in lista_archivos:
+        if archivo.name.endswith('.csv'):
+            df = pd.read_csv(archivo)
+        else:
+            df = pd.read_excel(archivo)
+        dfs.append(df)
+    return pd.concat(dfs, ignore_index=True)
+
+# --- BOTÓN DE PROCESAMIENTO ---
+if st.button("🚀 Generar Consolidado Total", use_container_width=True, type="primary"):
+    
+    if not archivos_arreglados or not archivos_conciliados:
+        st.error("⚠️ Faltan archivos obligatorios: Por favor carga al menos 'Arreglados' y 'Conciliados'.")
     else:
-        with st.spinner("Procesando archivos..."):
-            # 1. Leer y extraer la data base
-            datos_arr, detalles_obs = procesar_archivos(archivos_arreglados, "Arreglados")
-            datos_conc, _ = procesar_archivos(archivos_conciliados, "Conciliados")
-            
-            todos_los_datos = datos_arr + datos_conc
-            
-            if not todos_los_datos:
-                st.error("No se encontraron datos válidos para procesar en los archivos subidos.")
-            else:
-                # 2. Consolidar Base
-                df_crudo = pd.concat(todos_los_datos, ignore_index=True)
-                df_resumen = consolidar_df(df_crudo)
+        with st.spinner("Procesando y cruzando todas las bases de datos..."):
+            try:
+                # ------------------------------------------------------------------
+                # 1. BASE: ARREGLADOS Y CONCILIADOS
+                # ------------------------------------------------------------------
+                df_arreglados = cargar_multiples_archivos(archivos_arreglados)
+                df_conciliados = cargar_multiples_archivos(archivos_conciliados)
                 
-                df_arreglados_resumen = df_resumen[df_resumen['Origen'] == 'Arreglados'].drop(columns=['Origen'])
-                df_conciliados_resumen = df_resumen[df_resumen['Origen'] == 'Conciliados'].drop(columns=['Origen'])
+                # Llaves maestras de cruce
+                llaves_cruce = ['Fecha', 'Día tipo', 'Concesionario Programado', 'Tipo de vehículo del viaje']
                 
-                # --- 3. REPLICA DE POWER QUERY ---
-                # Agrupamos la de Conciliados (como el paso de "Sin Duplicados" en M)
-                df_conc_agrupado = df_conciliados_resumen.groupby(
-                    ['Fecha', 'Día tipo', 'Concesionario Programado', 'Tipo de vehículo del viaje'],
-                    as_index=False
-                ).agg(Largo_Conciliado=('Largo Total', 'sum'))
+                df_arreglados['Fecha'] = pd.to_datetime(df_arreglados['Fecha'], errors='coerce').dt.normalize()
+                df_conciliados['Fecha'] = pd.to_datetime(df_conciliados['Fecha'], errors='coerce').dt.normalize()
                 
-                # Merge (Unión LeftOuter) con la tabla Arreglados
-                df_powerquery_final = pd.merge(
-                    df_arreglados_resumen,
-                    df_conc_agrupado,
-                    on=['Fecha', 'Día tipo', 'Concesionario Programado', 'Tipo de vehículo del viaje'],
-                    how='left'
+                # Agrupar Conciliados
+                df_conc_agrupado = df_conciliados.groupby(llaves_cruce, as_index=False).agg(
+                    Largo_Conciliado=('Largo Total', 'sum')
                 )
-                df_powerquery_final['Largo_Conciliado'] = df_powerquery_final['Largo_Conciliado'].fillna(0)
-
-                # --- 4. Generación de Archivos para Descargar (En Memoria) ---
                 
-                # Archivo 1: Consolidado y Cruce Final
+                # Unir Base
+                df_consolidado = pd.merge(df_arreglados, df_conc_agrupado, on=llaves_cruce, how='left')
+                df_consolidado['Largo_Conciliado'] = df_consolidado['Largo_Conciliado'].fillna(0)
+                df_consolidado['Diferencia'] = df_consolidado['Largo Total'] - df_consolidado['Largo_Conciliado']
+
+                # ------------------------------------------------------------------
+                # 2. INCORPORAR PROGRAMACIÓN
+                # ------------------------------------------------------------------
+                df_prog = cargar_multiples_archivos(archivos_programacion)
+                if not df_prog.empty:
+                    df_prog['Fecha'] = pd.to_datetime(df_prog['Fecha'], errors='coerce').dt.normalize()
+                    # Renombrar columnas para que coincidan con las llaves maestras
+                    df_prog.rename(columns={'COT': 'Concesionario Programado', 'Tipología': 'Tipo de vehículo del viaje'}, inplace=True)
+                    df_prog_agrupado = df_prog.groupby(['Fecha', 'Concesionario Programado', 'Tipo de vehículo del viaje'], as_index=False).agg(
+                        Kilómetros_programados=('Largo', 'sum')
+                    )
+                    df_consolidado = pd.merge(df_consolidado, df_prog_agrupado, on=['Fecha', 'Concesionario Programado', 'Tipo de vehículo del viaje'], how='left')
+
+                # ------------------------------------------------------------------
+                # 3. INCORPORAR OBSERVACIONES (Aceptadas / No Aceptadas)
+                # ------------------------------------------------------------------
+                df_obs = cargar_multiples_archivos(archivos_observaciones)
+                if not df_obs.empty:
+                    df_obs['Fecha'] = pd.to_datetime(df_obs['Fecha'], errors='coerce').dt.normalize()
+                    # Se asume que existe una columna 'Respuesta UTRYT' (o similar) que dice "Se acepta" o "No se acepta"
+                    # Y una columna 'Largo_Observado' (Ajusta los nombres según tu archivo real)
+                    if 'Respuesta UTRYT ' in df_obs.columns and 'Largo_Observado' in df_obs.columns:
+                        # Filtrar aceptados y sumar
+                        df_obs_aceptados = df_obs[df_obs['Respuesta UTRYT '].astype(str).str.contains('Se acepta', case=False, na=False)]
+                        obs_ac_agrupado = df_obs_aceptados.groupby(['Fecha', 'Concesionario Programado', 'Tipología'], as_index=False).agg(Largo_aceptado=('Largo_Observado', 'sum'))
+                        obs_ac_agrupado.rename(columns={'Tipología': 'Tipo de vehículo del viaje'}, inplace=True)
+                        
+                        # Filtrar no aceptados y sumar
+                        df_obs_rechazados = df_obs[df_obs['Respuesta UTRYT '].astype(str).str.contains('No se acepta', case=False, na=False)]
+                        obs_rech_agrupado = df_obs_rechazados.groupby(['Fecha', 'Concesionario Programado', 'Tipología'], as_index=False).agg(Largo_no_aceptado=('Largo_Observado', 'sum'))
+                        obs_rech_agrupado.rename(columns={'Tipología': 'Tipo de vehículo del viaje'}, inplace=True)
+
+                        # Cruzar a la tabla principal
+                        df_consolidado = pd.merge(df_consolidado, obs_ac_agrupado, on=['Fecha', 'Concesionario Programado', 'Tipo de vehículo del viaje'], how='left')
+                        df_consolidado = pd.merge(df_consolidado, obs_rech_agrupado, on=['Fecha', 'Concesionario Programado', 'Tipo de vehículo del viaje'], how='left')
+
+                # ------------------------------------------------------------------
+                # 4. INCORPORAR ACTAS (Kms Conciliados Finales)
+                # ------------------------------------------------------------------
+                df_actas = cargar_multiples_archivos(archivos_actas)
+                if not df_actas.empty:
+                    df_actas['Fecha'] = pd.to_datetime(df_actas['Fecha'], errors='coerce').dt.normalize()
+                    df_actas.rename(columns={'Concesionario': 'Concesionario Programado', 'Tipologia': 'Tipo de vehículo del viaje'}, inplace=True)
+                    # Sumar los Kms Ejecutados/Conciliados de las actas
+                    actas_agrupado = df_actas.groupby(['Fecha', 'Concesionario Programado', 'Tipo de vehículo del viaje'], as_index=False).agg(
+                        Kms_conciliados=('Ejecutados', 'sum') # Asegúrate que la columna se llame 'Ejecutados' en tu Excel
+                    )
+                    df_consolidado = pd.merge(df_consolidado, actas_agrupado, on=['Fecha', 'Concesionario Programado', 'Tipo de vehículo del viaje'], how='left')
+
+                # ------------------------------------------------------------------
+                # 5. REPORTE DE OPERACIÓN Y BD (Incumplimientos y Salidas pivotados)
+                # ------------------------------------------------------------------
+                df_reporte = cargar_multiples_archivos(archivos_reporte)
+                if not df_reporte.empty and archivo_bd is not None:
+                    df_bd = pd.read_csv(archivo_bd) if archivo_bd.name.endswith('.csv') else pd.read_excel(archivo_bd)
+                    df_reporte['Fecha'] = pd.to_datetime(df_reporte['Fecha'], errors='coerce').dt.normalize()
+                    
+                    # Cruzar Reporte con BD para traer 'Jerarquía simple'
+                    df_reporte = pd.merge(df_reporte, df_bd[['Jerarquía completa', 'Jerarquía simple']], left_on='Novedad', right_on='Jerarquía completa', how='left')
+                    
+                    # Pivotear los Kms perdidos
+                    df_reporte_pivot = df_reporte.pivot_table(
+                        index=['Fecha', 'COT', 'Tipo de vehículo del viaje'],
+                        columns='Jerarquía simple',
+                        values='KMS perdidos',
+                        aggfunc='sum',
+                        fill_value=0
+                    ).reset_index()
+                    
+                    df_reporte_pivot.rename(columns={'COT': 'Concesionario Programado'}, inplace=True)
+                    df_consolidado = pd.merge(df_consolidado, df_reporte_pivot, on=['Fecha', 'Concesionario Programado', 'Tipo de vehículo del viaje'], how='left')
+
+                # ------------------------------------------------------------------
+                # 6. CÁLCULOS FINALES Y LIMPIEZA
+                # ------------------------------------------------------------------
+                # Mes y Quincena
+                meses = {1:'Enero', 2:'Febrero', 3:'Marzo', 4:'Abril', 5:'Mayo', 6:'Junio', 
+                         7:'Julio', 8:'Agosto', 9:'Septiembre', 10:'Octubre', 11:'Noviembre', 12:'Diciembre'}
+                df_consolidado['Mes'] = df_consolidado['Fecha'].dt.month.map(meses)
+                df_consolidado['Quincena'] = df_consolidado['Fecha'].dt.day.apply(lambda x: '1Q' if x <= 15 else '2Q')
+
+                # Rellenar todos los nulos (archivos que no cruzaron) con 0
+                df_consolidado.fillna(0, inplace=True)
+
+                # ------------------------------------------------------------------
+                # 7. EXPORTAR A EXCEL
+                # ------------------------------------------------------------------
                 buffer_consolidado = io.BytesIO()
                 with pd.ExcelWriter(buffer_consolidado, engine='xlsxwriter', datetime_format='yyyy-mm-dd') as writer:
-                    df_arreglados_resumen.to_excel(writer, sheet_name='Resumen_Arreglados', index=False)
-                    df_conciliados_resumen.to_excel(writer, sheet_name='Resumen_Conciliados', index=False)
-                    df_powerquery_final.to_excel(writer, sheet_name='Cruce_Final_PQ', index=False) # Resultado del PowerQuery
+                    df_consolidado.to_excel(writer, sheet_name='Consolidado', index=False)
                     
-                    # Formato de tablas
-                    for sheet_name, df_sheet in zip(
-                        ['Resumen_Arreglados', 'Resumen_Conciliados', 'Cruce_Final_PQ'], 
-                        [df_arreglados_resumen, df_conciliados_resumen, df_powerquery_final]
-                    ):
-                        if not df_sheet.empty:
-                            worksheet = writer.sheets[sheet_name]
-                            worksheet.add_table(0, 0, df_sheet.shape[0], df_sheet.shape[1] - 1, {
-                                'columns': [{'header': col} for col in df_sheet.columns],
-                                'name': f'Tabla_{sheet_name}', 'style': TABLA_ESTILO
-                            })
+                    # Formato Tabla
+                    worksheet = writer.sheets['Consolidado']
+                    max_row, max_col = df_consolidado.shape
+                    worksheet.add_table(0, 0, max_row, max_col - 1, {
+                        'columns': [{'header': str(col)} for col in df_consolidado.columns],
+                        'name': 'Tabla_Consolidado_Final', 
+                        'style': TABLA_ESTILO
+                    })
 
-                # Archivo 2: Detalle Observados
-                buffer_detalles = io.BytesIO()
-                hay_detalles = len(detalles_obs) > 0
-                if hay_detalles:
-                    df_detalles = pd.concat(detalles_obs, ignore_index=True)
-                    with pd.ExcelWriter(buffer_detalles, engine='xlsxwriter', datetime_format='yyyy-mm-dd') as writer:
-                        df_detalles.to_excel(writer, sheet_name='Detalle_Observados', index=False)
-                        worksheet = writer.sheets['Detalle_Observados']
-                        worksheet.add_table(0, 0, df_detalles.shape[0], df_detalles.shape[1] - 1, {
-                            'columns': [{'header': str(col)} for col in df_detalles.columns],
-                            'name': 'Tabla_Detalle_Observados', 'style': TABLA_ESTILO
-                        })
-
-                # --- 5. Interfaz de Descarga ---
-                st.success("✅ ¡Proceso completado exitosamente!")
+                st.success("✅ ¡Consolidado Total generado exitosamente! Todos los archivos fueron cruzados.")
                 
-                st.subheader("📥 Descargar Resultados")
+                # --- BOTÓN DE DESCARGA ---
                 st.download_button(
-                    label="📄 Descargar Consolidado y Cruce (Ex-PowerQuery)",
+                    label="📥 Descargar Archivo Consolidado Completo",
                     data=buffer_consolidado.getvalue(),
-                    file_name="Consolidado_Kilometros_RESUMEN_App.xlsx",
+                    file_name="Reporte_Consolidado_Maestro.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     type="primary"
                 )
                 
-                if hay_detalles:
-                    st.download_button(
-                        label="📄 Descargar Detalles 'Observados'",
-                        data=buffer_detalles.getvalue(),
-                        file_name="Detalle_Registros_Observados_App.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                # Vista previa
+                st.subheader("Vista Previa del Consolidado")
+                st.dataframe(df_consolidado.head(10))
+
+            except KeyError as e:
+                st.error(f"⚠️ Error de Columna: No se encontró la columna {str(e)} en alguno de los archivos.")
+                st.info("Asegúrate de que los encabezados de tus archivos Excel coincidan exactamente con los nombres que espera el código (ej. 'Concesionario Programado', 'COT', 'Tipología').")
+            except Exception as e:
+                st.error(f"⚠️ Ocurrió un error inesperado al procesar las bases: {str(e)}")
